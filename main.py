@@ -206,8 +206,12 @@ def build_states(case):
     """Collapse the read history to distinct page states.
 
     Each state is (t_hours, players, rates, weight): the first read that
-    showed the page, and a weight from how long the page stood, capped,
-    with a floor.
+    showed the page, and a weight from how long the page stood in total,
+    capped, with a floor. One exception: if the history's LAST read shows
+    a page first seen earlier (the page recurred -- a cached page served
+    again), that page is the current one, so its state moves to the end,
+    timed at the last read; keyed purely on first sighting, the final
+    read would be ignored entirely.
     """
     hist = case["history"]
     at_h = parse_time(case["at"])
@@ -233,6 +237,15 @@ def build_states(case):
         t, players, rates = seen[key]
         w = min(spans.get(key, 0.5), 4.0) + 0.25
         states.append((t, players, rates, w))
+    if hist:
+        last_key = (hist[-1]["players_tracked"], tuple(hist[-1]["rates"]))
+        j = order.index(last_key) if last_key in order else -1
+        if 0 <= j < len(states) - 1:
+            t_last_read = parse_time(hist[-1]["at"])
+            _, players, rates = seen[last_key]
+            w = min(spans.get(last_key, 0.5), 4.0) + 0.25
+            states = [s for k, s in enumerate(states) if k != j]
+            states.append((t_last_read, players, rates, w))
     if len(states) > MAX_STATES:
         step = len(states) / MAX_STATES
         thin = [states[min(len(states) - 1, int(i * step))] for i in range(MAX_STATES)]
@@ -384,12 +397,17 @@ def stale_page_forecast(case, states):
 
 
 def persistence_rows(case):
-    """The starter's forecast: last rate, random-walk spread."""
-    last = case["history"][-1]
-    spread = 0.5 * math.sqrt(case["horizon_minutes"] / 1440.0)
+    """The starter's forecast: last rate, random-walk spread. Defensive
+    gets throughout: this runs because something else already failed, so
+    it must not be able to fail on the same input."""
+    hist = case.get("history") or []
+    last = hist[-1] if hist and isinstance(hist[-1], dict) else {}
+    rates = last.get("rates") or []
+    horizon = case.get("horizon_minutes") or 1440.0
+    spread = 0.5 * math.sqrt(max(0.0, horizon) / 1440.0)
     rows = []
-    for i, trophy in enumerate(case["trophies"]):
-        r = last["rates"][i] if i < len(last["rates"]) else None
+    for i, trophy in enumerate(case.get("trophies") or []):
+        r = rates[i] if i < len(rates) else None
         rows.append((r if r is not None else 0.0, spread))
     return rows
 
@@ -411,6 +429,8 @@ def rows_to_output(trophies, med_sigma, zs):
 
 def forecast_case(case):
     levels = case.get("levels") or LEVELS
+    if len(levels) != len(LEVELS):
+        levels = LEVELS
     zs = [z_for(lv) for lv in levels]
     trophies = case["trophies"]
     if not case.get("history"):
@@ -464,13 +484,16 @@ def forecast_case(case):
 def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     for path in sorted(INPUT_DIR.glob("*.in")):
-        case = json.loads(path.read_text(encoding="utf-8"))
         try:
-            forecast = forecast_case(case)
+            case = json.loads(path.read_text(encoding="utf-8"))
+            try:
+                forecast = forecast_case(case)
+            except Exception:
+                forecast = rows_to_output(
+                    case["trophies"], persistence_rows(case),
+                    [z_for(lv) for lv in (case.get("levels") or LEVELS)])
         except Exception:
-            forecast = rows_to_output(
-                case["trophies"], persistence_rows(case),
-                [z_for(lv) for lv in (case.get("levels") or LEVELS)])
+            continue
         (OUTPUT_DIR / f"{path.stem}.out").write_text(
             json.dumps(forecast, separators=(",", ":")) + "\n", encoding="utf-8")
 
