@@ -289,12 +289,18 @@ def fit_predict(states, target_h, trophies_n):
     # anchored to the same recent level the trophies use.
     ln_p_level = recent_level([(math.log(max(1, s[1])), s[3]) for s in states])
     ln_p_preds = []
+    player_fits = []
     for sub in wins:
         xs = [x_of(s[0]) for s in sub]
         fit = wls(xs, [math.log(max(1, s[1])) for s in sub], [s[3] for s in sub])
+        player_fits.append(fit)
         ln_p_preds.append(anchored_predict(fit, fit.b, x_last, x_target,
                                            ln_p_level, DAMP_PLAYERS))
     ln_p_pred = median(ln_p_preds)
+    # The earners view divides by this curve, so its uncertainty is part of
+    # that view's spread (weighted by the view's share, squared).
+    dx_x = x_target - x_last
+    p_var = median([f.resid ** 2 + (f.se_b * dx_x) ** 2 for f in player_fits])
 
     # Per-trophy series.
     e_series, r_series = [], []
@@ -368,7 +374,7 @@ def fit_predict(states, target_h, trophies_n):
         e_last.append(pres[-1] if pres else None)
         present_last.append(bool(e_series[i] and e_series[i][-1] is not None))
     extras = {"resid": out_resid, "se_b": out_seb, "disagree": out_dis,
-              "e_last": e_last, "present_last": present_last}
+              "e_last": e_last, "present_last": present_last, "p_var": p_var}
     return logits, extras
 
 
@@ -465,7 +471,8 @@ def forecast_case(case):
             var = (extras["resid"][i] ** 2
                    + (max(extras["se_b"][i], 0.08) * dx) ** 2
                    + 0.3 ** 2
-                   + 0.5 * extras["disagree"][i])
+                   + 0.5 * extras["disagree"][i]
+                   + (W_EARNERS_VIEW ** 2) * extras["p_var"])
             sigma = SIGMA_CAL * math.sqrt(var)
             if last_obs is not None and last_obs <= 0.0:
                 sigma = max(sigma, 1.1)
